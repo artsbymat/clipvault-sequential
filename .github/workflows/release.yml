@@ -1,0 +1,96 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to release (e.g. v1.0.0; defaults to version in Cargo.toml)'
+        required: false
+        default: ''
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    name: Build & Release Binary
+    runs-on: ubuntu-latest
+    env:
+      CARGO_TERM_COLOR: always
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Determine release version and tag
+        id: get_version
+        run: |
+          if [ -n "${{ github.event.inputs.tag }}" ]; then
+            TAG="${{ github.event.inputs.tag }}"
+          elif [ "${GITHUB_REF_TYPE:-}" = "tag" ]; then
+            TAG="${GITHUB_REF_NAME}"
+          else
+            VERSION=$(awk -F ' = ' '/^version/ {gsub(/"/, "", $2); print $2; exit}' Cargo.toml)
+            TAG="v${VERSION}"
+          fi
+
+          # Strip leading 'v' to get raw semantic version
+          VERSION="${TAG#v}"
+
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "Releasing version ${VERSION} with tag ${TAG}"
+
+      - name: Set up Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-gnu
+
+      - name: Cache Cargo dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libwayland-dev libxkbcommon-dev
+
+      - name: Run tests
+        run: cargo test --locked
+
+      - name: Build release binary
+        run: cargo build --release --locked --target x86_64-unknown-linux-gnu
+
+      - name: Package release artifacts
+        run: |
+          TAG="${{ steps.get_version.outputs.tag }}"
+          ARCH="x86_64-unknown-linux-gnu"
+          PKG_NAME="clipvault-sequential-${TAG}-${ARCH}"
+          DIST_DIR="dist"
+
+          mkdir -p "${DIST_DIR}/${PKG_NAME}"
+          cp target/x86_64-unknown-linux-gnu/release/clipvault-sequential "${DIST_DIR}/${PKG_NAME}/"
+          [ -f README.md ] && cp README.md "${DIST_DIR}/${PKG_NAME}/"
+          [ -f LICENSE ] && cp LICENSE "${DIST_DIR}/${PKG_NAME}/"
+          [ -f LICENSE.md ] && cp LICENSE.md "${DIST_DIR}/${PKG_NAME}/"
+
+          cd "${DIST_DIR}"
+          tar -czvf "${PKG_NAME}.tar.gz" "${PKG_NAME}"
+          sha256sum "${PKG_NAME}.tar.gz" > "${PKG_NAME}.tar.gz.sha256"
+          rm -rf "${PKG_NAME}"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.get_version.outputs.tag }}
+          name: Release ${{ steps.get_version.outputs.tag }}
+          files: |
+            dist/*.tar.gz
+            dist/*.sha256
+          generate_release_notes: true
+          draft: false
+          prerelease: false
